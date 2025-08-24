@@ -5,18 +5,15 @@ import (
 	"net/http"
 	"time"
 
-	//
 	"mcp-go/internal/globals"
 	"mcp-go/internal/handlers"
 	"mcp-go/internal/middlewares"
 	"mcp-go/internal/tools"
 
-	//
 	"github.com/mark3labs/mcp-go/server"
 )
 
 func main() {
-
 	// 0. Process the configuration
 	appCtx, err := globals.NewApplicationContext()
 	if err != nil {

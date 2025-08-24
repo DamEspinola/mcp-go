@@ -14,6 +14,8 @@ import (
 	_ "modernc.org/sqlite" // SQLite driver
 )
 
+// TODO: Implementar clean code aqui
+
 // DatabaseConnection holds connection information for a database
 type DatabaseConnection struct {
 	Driver     string
@@ -53,21 +55,21 @@ func (tm *ToolsManager) HandleToolDatabaseQuery(ctx context.Context, request mcp
 		}, nil
 	}
 
-	// Validate that the query is a SELECT statement for security
+	// Validar que la consulta sea SELECT o INSERT por seguridad
 	normalizedQuery := strings.TrimSpace(strings.ToUpper(query))
-	if !strings.HasPrefix(normalizedQuery, "SELECT") {
+	if !(strings.HasPrefix(normalizedQuery, "SELECT") || strings.HasPrefix(normalizedQuery, "INSERT")) {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				mcp.TextContent{
 					Type: "text",
-					Text: "❌ **Error:** Only SELECT queries are allowed for security reasons",
+					Text: "❌ **Error:** Solo se permiten consultas SELECT o INSERT por razones de seguridad",
 				},
 			},
 			IsError: true,
 		}, nil
 	}
 
-	// Get the database connection
+	// Obtener la conexión a la base de datos
 	dbConn, exists := dbConnections[connectionName]
 	if !exists {
 		return &mcp.CallToolResult{
@@ -81,7 +83,27 @@ func (tm *ToolsManager) HandleToolDatabaseQuery(ctx context.Context, request mcp
 		}, nil
 	}
 
-	// Execute the query
+	// Manejar SELECT o INSERT de manera diferente
+	if strings.HasPrefix(normalizedQuery, "SELECT") {
+		return tm.handleSelectQuery(ctx, connectionName, dbConn, query)
+	} else if strings.HasPrefix(normalizedQuery, "INSERT") {
+		return tm.handleInsertQuery(ctx, connectionName, dbConn, query)
+	}
+
+	// Este return nunca debería ejecutarse debido a la validación anterior
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			mcp.TextContent{
+				Type: "text",
+				Text: "❌ **Error:** Tipo de consulta no soportado",
+			},
+		},
+		IsError: true,
+	}, nil
+}
+
+func (tm *ToolsManager) handleSelectQuery(ctx context.Context, connectionName string, dbConn *DatabaseConnection, query string) (*mcp.CallToolResult, error) {
+	// Ejecutar la consulta SELECT
 	rows, err := dbConn.Connection.QueryContext(ctx, query)
 	if err != nil {
 		return &mcp.CallToolResult{
@@ -96,7 +118,7 @@ func (tm *ToolsManager) HandleToolDatabaseQuery(ctx context.Context, request mcp
 	}
 	defer rows.Close()
 
-	// Get column information
+	// Obtener información de columnas
 	columns, err := rows.Columns()
 	if err != nil {
 		return &mcp.CallToolResult{
@@ -110,38 +132,38 @@ func (tm *ToolsManager) HandleToolDatabaseQuery(ctx context.Context, request mcp
 		}, nil
 	}
 
-	// Prepare result
+	// Preparar resultado
 	var result strings.Builder
 	result.WriteString(fmt.Sprintf("✅ **Database Query Results** (Connection: %s, Driver: %s)\n\n", connectionName, dbConn.Driver))
 	result.WriteString(fmt.Sprintf("**Query:** `%s`\n\n", query))
 
-	// Create table header
+	// Crear encabezado de tabla
 	result.WriteString("| ")
 	for _, col := range columns {
 		result.WriteString(fmt.Sprintf("%s | ", col))
 	}
 	result.WriteString("\n")
 
-	// Create table separator
+	// Crear separador de tabla
 	result.WriteString("|")
 	for range columns {
 		result.WriteString("---|")
 	}
 	result.WriteString("\n")
 
-	// Process rows
+	// Procesar filas
 	rowCount := 0
-	maxRows := 100 // Limit results for performance
+	maxRows := 100 // Limitar resultados por rendimiento
 
 	for rows.Next() && rowCount < maxRows {
-		// Create a slice to hold the values
+		// Crear slice para contener los valores
 		values := make([]interface{}, len(columns))
 		valuePtrs := make([]interface{}, len(columns))
 		for i := range values {
 			valuePtrs[i] = &values[i]
 		}
 
-		// Scan the row into the value pointers
+		// Escanear la fila en los punteros de valor
 		if err := rows.Scan(valuePtrs...); err != nil {
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{
@@ -154,7 +176,7 @@ func (tm *ToolsManager) HandleToolDatabaseQuery(ctx context.Context, request mcp
 			}, nil
 		}
 
-		// Convert values to strings and build row
+		// Convertir valores a strings y construir fila
 		result.WriteString("| ")
 		for _, val := range values {
 			var str string
@@ -168,7 +190,7 @@ func (tm *ToolsManager) HandleToolDatabaseQuery(ctx context.Context, request mcp
 					str = fmt.Sprintf("%v", v)
 				}
 			}
-			// Escape pipe characters and limit length
+			// Escapar caracteres pipe y limitar longitud
 			str = strings.ReplaceAll(str, "|", "\\|")
 			if len(str) > 50 {
 				str = str[:47] + "..."
@@ -179,7 +201,7 @@ func (tm *ToolsManager) HandleToolDatabaseQuery(ctx context.Context, request mcp
 		rowCount++
 	}
 
-	// Check for iteration errors
+	// Verificar errores de iteración
 	if err := rows.Err(); err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
@@ -192,7 +214,7 @@ func (tm *ToolsManager) HandleToolDatabaseQuery(ctx context.Context, request mcp
 		}, nil
 	}
 
-	// Add summary
+	// Agregar resumen
 	result.WriteString(fmt.Sprintf("\n📊 **Summary:**\n- **Rows returned:** %d", rowCount))
 	if rowCount >= maxRows {
 		result.WriteString(fmt.Sprintf(" (limited to %d rows)", maxRows))
@@ -204,6 +226,44 @@ func (tm *ToolsManager) HandleToolDatabaseQuery(ctx context.Context, request mcp
 			mcp.TextContent{
 				Type: "text",
 				Text: result.String(),
+			},
+		},
+	}, nil
+}
+
+func (tm *ToolsManager) handleInsertQuery(ctx context.Context, connectionName string, dbConn *DatabaseConnection, query string) (*mcp.CallToolResult, error) {
+	// Ejecutar la consulta INSERT
+	result, err := dbConn.Connection.ExecContext(ctx, query)
+	if err != nil {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				mcp.TextContent{
+					Type: "text",
+					Text: fmt.Sprintf("❌ **Database Insert Error:**\n\n%v\n\n**Query:** %s", err, query),
+				},
+			},
+			IsError: true,
+		}, nil
+	}
+
+	// Obtener número de filas afectadas
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		rowsAffected = -1 // Indicar que no se pudo obtener el número
+	}
+
+	// Intentar obtener el último ID insertado (útil para tablas con auto-increment)
+	var lastInsertInfo string
+	if lastInsertID, err := result.LastInsertId(); err == nil && lastInsertID > 0 {
+		lastInsertInfo = fmt.Sprintf("\n- **Último ID insertado:** %d", lastInsertID)
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			mcp.TextContent{
+				Type: "text",
+				Text: fmt.Sprintf("✅ **INSERT ejecutado correctamente** (Connection: %s, Driver: %s)\n\n**Query:** `%s`\n\n📊 **Resultado:**\n- **Filas afectadas:** %d%s",
+					connectionName, dbConn.Driver, query, rowsAffected, lastInsertInfo),
 			},
 		},
 	}, nil

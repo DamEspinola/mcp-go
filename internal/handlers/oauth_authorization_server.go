@@ -5,7 +5,10 @@ import (
 	"net/http"
 )
 
-// HandleOauthAuthorizationServer process requests for endpoint: /.well-known/oauth-authorization-server
+/*
+HandleOauthAuthorizationServer process requests for endpoint: /.well-known/oauth-authorization-server
+*/
+
 func (h *HandlersManager) HandleOauthAuthorizationServer(response http.ResponseWriter, request *http.Request) {
 
 	remoteUrl := h.dependencies.AppCtx.Config.OAuthAuthorizationServer.IssuerUri + "/.well-known/openid-configuration"
