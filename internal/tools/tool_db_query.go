@@ -2,16 +2,15 @@ package tools
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"strings"
 
-	_ "github.com/go-sql-driver/mysql" // MySQL driver
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+
 	"github.com/joho/godotenv"
-	_ "github.com/lib/pq" // PostgreSQL driver
 	"github.com/mark3labs/mcp-go/mcp"
-	_ "modernc.org/sqlite" // SQLite driver
 )
 
 // TODO: Implementar clean code aqui
@@ -19,7 +18,36 @@ import (
 // DatabaseConnection holds connection information for a database
 type DatabaseConnection struct {
 	Driver     string
-	Connection *sql.DB
+	Connection *gorm.DB
+}
+
+// createGormConnection creates a new GORM database connection
+func createGormConnection(driver, connectionString string) (*gorm.DB, error) {
+	var db *gorm.DB
+	var err error
+
+	switch driver {
+	case "postgres":
+		db, err = gorm.Open(postgres.Open(connectionString), &gorm.Config{})
+	default:
+		return nil, fmt.Errorf("unsupported driver: %s. Currently only postgres is supported", driver)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Test the connection
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := sqlDB.Ping(); err != nil {
+		return nil, err
+	}
+
+	return db, nil
 }
 
 // dbConnections stores active database connections
@@ -103,8 +131,22 @@ func (tm *ToolsManager) HandleToolDatabaseQuery(ctx context.Context, request mcp
 }
 
 func (tm *ToolsManager) handleSelectQuery(ctx context.Context, connectionName string, dbConn *DatabaseConnection, query string) (*mcp.CallToolResult, error) {
-	// Ejecutar la consulta SELECT
-	rows, err := dbConn.Connection.QueryContext(ctx, query)
+	// Get the underlying sql.DB from GORM
+	sqlDB, err := dbConn.Connection.DB()
+	if err != nil {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				mcp.TextContent{
+					Type: "text",
+					Text: fmt.Sprintf("❌ **Error getting SQL DB:** %v", err),
+				},
+			},
+			IsError: true,
+		}, nil
+	}
+
+	// Ejecutar la consulta SELECT usando GORM's raw SQL capability
+	rows, err := sqlDB.QueryContext(ctx, query)
 	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
@@ -232,8 +274,22 @@ func (tm *ToolsManager) handleSelectQuery(ctx context.Context, connectionName st
 }
 
 func (tm *ToolsManager) handleInsertQuery(ctx context.Context, connectionName string, dbConn *DatabaseConnection, query string) (*mcp.CallToolResult, error) {
+	// Get the underlying sql.DB from GORM
+	sqlDB, err := dbConn.Connection.DB()
+	if err != nil {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				mcp.TextContent{
+					Type: "text",
+					Text: fmt.Sprintf("❌ **Error getting SQL DB:** %v", err),
+				},
+			},
+			IsError: true,
+		}, nil
+	}
+
 	// Ejecutar la consulta INSERT
-	result, err := dbConn.Connection.ExecContext(ctx, query)
+	result, err := sqlDB.ExecContext(ctx, query)
 	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
@@ -246,6 +302,7 @@ func (tm *ToolsManager) handleInsertQuery(ctx context.Context, connectionName st
 		}, nil
 	}
 
+	// ...existing code for handling result...
 	// Obtener número de filas afectadas
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
@@ -315,8 +372,6 @@ func (tm *ToolsManager) HandleToolDatabaseConnect(ctx context.Context, request m
 	// Validate driver
 	validDrivers := map[string]bool{
 		"postgres": true,
-		"mysql":    true,
-		"sqlite":   true,
 	}
 
 	if !validDrivers[driver] {
@@ -324,7 +379,7 @@ func (tm *ToolsManager) HandleToolDatabaseConnect(ctx context.Context, request m
 			Content: []mcp.Content{
 				mcp.TextContent{
 					Type: "text",
-					Text: "❌ **Error:** Invalid driver. Supported drivers: postgres, mysql, sqlite",
+					Text: "❌ **Error:** Invalid driver. Currently only 'postgres' is supported with GORM",
 				},
 			},
 			IsError: true,
@@ -333,11 +388,13 @@ func (tm *ToolsManager) HandleToolDatabaseConnect(ctx context.Context, request m
 
 	// Close existing connection if it exists
 	if existingConn, exists := dbConnections[connectionName]; exists {
-		existingConn.Connection.Close()
+		if sqlDB, err := existingConn.Connection.DB(); err == nil {
+			sqlDB.Close()
+		}
 	}
 
-	// Create new connection
-	db, err := sql.Open(driver, connectionString)
+	// Create new GORM connection
+	db, err := createGormConnection(driver, connectionString)
 	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
@@ -350,21 +407,7 @@ func (tm *ToolsManager) HandleToolDatabaseConnect(ctx context.Context, request m
 		}, nil
 	}
 
-	// Test the connection
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{
-				mcp.TextContent{
-					Type: "text",
-					Text: fmt.Sprintf("❌ **Error pinging database:**\n\n%v\n\n**Driver:** %s\n**Connection:** %s", err, driver, connectionString),
-				},
-			},
-			IsError: true,
-		}, nil
-	}
-
-	// Store the connection
+	// Store the connection (the connection test is already done in createGormConnection)
 	dbConnections[connectionName] = &DatabaseConnection{
 		Driver:     driver,
 		Connection: db,
@@ -433,7 +476,10 @@ func (tm *ToolsManager) HandleToolDatabaseList(ctx context.Context, request mcp.
 
 	for name, conn := range dbConnections {
 		status := "Active"
-		if err := conn.Connection.Ping(); err != nil {
+		// Test connection using GORM
+		if sqlDB, err := conn.Connection.DB(); err != nil {
+			status = "❌ Disconnected"
+		} else if err := sqlDB.Ping(); err != nil {
 			status = "❌ Disconnected"
 		} else {
 			status = "✅ Active"
@@ -491,11 +537,13 @@ func (tm *ToolsManager) HandleToolDatabaseConnectFromEnv(ctx context.Context, re
 
 	// Close existing connection if it exists
 	if existingConn, exists := dbConnections[connectionName]; exists {
-		existingConn.Connection.Close()
+		if sqlDB, err := existingConn.Connection.DB(); err == nil {
+			sqlDB.Close()
+		}
 	}
 
-	// Create new connection
-	db, err := sql.Open("postgres", databaseURL)
+	// Create new GORM connection
+	db, err := createGormConnection("postgres", databaseURL)
 	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
@@ -508,21 +556,7 @@ func (tm *ToolsManager) HandleToolDatabaseConnectFromEnv(ctx context.Context, re
 		}, nil
 	}
 
-	// Test the connection
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{
-				mcp.TextContent{
-					Type: "text",
-					Text: fmt.Sprintf("❌ **Error pinging database:**\n\n%v\n\n**Database URL:** %s", err, databaseURL),
-				},
-			},
-			IsError: true,
-		}, nil
-	}
-
-	// Store the connection
+	// Store the connection (the connection test is already done in createGormConnection)
 	dbConnections[connectionName] = &DatabaseConnection{
 		Driver:     "postgres",
 		Connection: db,
